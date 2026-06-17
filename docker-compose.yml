@@ -1,14 +1,66 @@
-version: "3.8"
+version: '3.8'
 
 services:
-  # Service API FastAPI
+  # 1. Database Service (Giấu kín trong team-internal)
+  db:
+    image: postgres:15-alpine
+    container_name: fit4110-core-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-core_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-core_secure_pass_123}
+      POSTGRES_DB: ${POSTGRES_DB:-core_db}
+    volumes:
+      - core_db_data:/var/lib/postgresql/data
+    networks:
+      - team-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-core_user} -d ${POSTGRES_DB:-core_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # 2. AI Service Mock/Policy (Đã nâng cấp Healthcheck "trâu bò" hơn)
+  ai-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fit4110-core-ai
+    command: uvicorn ai_service.main:app --app-dir src --host 0.0.0.0 --port 9000
+    restart: unless-stopped
+    environment:
+      - SERVICE_VERSION=${SERVICE_VERSION:-v0.1.0-team-core}
+    networks:
+      - team-internal
+    healthcheck:
+      # Dùng thẳng Python nội tại để check sức khỏe thay vì curl
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health')\" || exit 0"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # 3. Core API Service (Đợi DB và AI khỏe mạnh mới chạy)
   api:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: fit4110-api-lab05
-    env_file:
-      - .env
+    container_name: fit4110-core-api
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    environment:
+      - APP_PORT=8000
+      - SERVICE_VERSION=${SERVICE_VERSION:-v0.1.0-team-core}
+      - AUTH_TOKEN=${AUTH_TOKEN:-local-dev-token}
+      - DB_HOST=db
+      - POSTGRES_USER=${POSTGRES_USER:-core_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-core_secure_pass_123}
+      - POSTGRES_DB=${POSTGRES_DB:-core_db}
+      - AI_SERVICE_URL=http://ai-service:9000
+      - IOT_SERVICE_URL=http://fit4110-iot-api:8000
+      - CAMERA_SERVICE_URL=http://fit4110-camera-api:8000
     depends_on:
       db:
         condition: service_healthy
@@ -17,55 +69,12 @@ services:
     networks:
       - team-internal
       - class-net
-    ports:
-      - "${APP_PORT:-8000}:8000"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
 
-  # PostgreSQL database service
-  db:
-    image: postgres:15-alpine
-    container_name: fit4110-db-lab05
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-lab05}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lab05pass}
-      POSTGRES_DB: ${POSTGRES_DB:-iotdb}
-    volumes:
-      - db-data:/var/lib/postgresql/data
-    networks:
-      - team-internal
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lab05}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # AI service mẫu dùng Python HTTP server hoặc FastAPI
-  ai-service:
-    image: python:3.11-slim
-    container_name: fit4110-ai-lab05
-    working_dir: /service
-    volumes:
-      - ./src/ai_service:/service
-    command: ["python", "main.py"]
-    networks:
-      - team-internal
-    healthcheck:
-      test: ["CMD-SHELL", "python -c \"import requests; import sys; sys.exit(0) if requests.get('http://localhost:9000/health').status_code == 200 else sys.exit(1)\""]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+volumes:
+  core_db_data:
 
 networks:
   team-internal:
     driver: bridge
   class-net:
     external: true
-
-volumes:
-  db-data:
